@@ -1,0 +1,88 @@
+name: Release s390x
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g., v1.29.9-build20260127)"
+        required: true
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: dnse-tech/rke2-cloud-provider
+  UPSTREAM_IMAGE: rancher/rke2-cloud-provider
+
+jobs:
+  build-s390x:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.get-tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Get tag
+        id: get-tag
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Building s390x for tag: $TAG"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/s390x
+          push: true
+          build-args: |
+            TAG=${{ steps.get-tag.outputs.tag }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.get-tag.outputs.tag }}-s390x
+
+  create-manifest:
+    needs: build-s390x
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull and retag upstream images
+        run: |
+          TAG="${{ needs.build-s390x.outputs.tag }}"
+          for ARCH in amd64 arm64; do
+            echo "Pulling ${{ env.UPSTREAM_IMAGE }}:${TAG} for ${ARCH}..."
+            docker pull --platform linux/${ARCH} ${{ env.UPSTREAM_IMAGE }}:${TAG}
+            docker tag ${{ env.UPSTREAM_IMAGE }}:${TAG} ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TAG}-${ARCH}
+            docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TAG}-${ARCH}
+          done
+
+      - name: Create multi-arch manifest
+        run: |
+          TAG="${{ needs.build-s390x.outputs.tag }}"
+          docker buildx imagetools create \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TAG} \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TAG}-amd64 \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TAG}-arm64 \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TAG}-s390x
+
+      - name: Verify manifest
+        run: |
+          TAG="${{ needs.build-s390x.outputs.tag }}"
+          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TAG}
